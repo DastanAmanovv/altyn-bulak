@@ -114,7 +114,8 @@
     color:rgba(243,233,214,.75);letter-spacing:.03em;transition:opacity .4s;
     animation:blink 2.4s ease-in-out infinite}
   @keyframes blink{50%{opacity:.4}}
-  .hide{opacity:0!important;pointer-events:none}
+  .hide{animation:none!important;opacity:0!important;visibility:hidden;pointer-events:none;transition:opacity .4s,visibility 0s .4s}
+  .stage.gone{visibility:hidden}
 
   /* ---------- Final view ---------- */
   .view{position:fixed;inset:0;z-index:10;display:flex;flex-direction:column;align-items:center;justify-content:center;
@@ -181,6 +182,7 @@
     env.classList.add('opened'); hint.classList.add('hide'); document.getElementById('names').classList.add('hide');
     steps.forEach(([c,t]) => setTimeout(() => env.classList.add(c), t));
     setTimeout(() => view.classList.add('on'), 2700);
+    setTimeout(() => document.getElementById('stage').classList.add('gone'), 3700);
     if (navigator.vibrate) navigator.vibrate(15);
   }
   env.addEventListener('click', open);
