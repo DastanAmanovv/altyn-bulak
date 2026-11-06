@@ -132,6 +132,12 @@
     padding:10px 18px;border-radius:999px;background:rgba(0,0,0,.15);cursor:pointer}
   .btn:hover{background:rgba(230,199,122,.12)}
 
+  .mute{position:fixed;z-index:20;top:max(14px,env(safe-area-inset-top));right:14px;width:44px;height:44px;
+    border-radius:50%;border:1px solid rgba(230,199,122,.45);background:rgba(0,0,0,.25);color:var(--gold-1);
+    display:grid;place-items:center;cursor:pointer;-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+  .mute[hidden]{display:none}
+  .mute .off,.mute.muted .on{display:none}
+  .mute.muted .off{display:inline}
   @media (prefers-reduced-motion:reduce){
     .env,.seal::after,.hint,.title{animation:none}
   }
@@ -172,7 +178,123 @@
   </div>
 </div>
 
+<button class="mute" id="mute" aria-label="Үн" hidden>
+  <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 9h3l5-4v14l-5-4H4z"/>
+    <path class="on" d="M16 9a4 4 0 0 1 0 6M18.5 6.5a7.5 7.5 0 0 1 0 11"/>
+    <path class="off" d="M16 9.5l5 5M21 9.5l-5 5"/>
+  </svg>
+</button>
+
 <script>
+// Музыкальная шкатулка: всё синтезируется в браузере, без аудиофайлов.
+const sound = (() => {
+  let ac, master, bus, muted = false, timer, step = 0, nextT = 0;
+  const Q = .46;  // длительность доли, сек (вальс 3/4)
+  const N = n => 440 * Math.pow(2, (n - 69) / 12);
+  // мелодия: [midi, доли]; D-мажорная пентатоника
+  const D4=62,E4=64,Fs4=66,A4=69,B4=71,D5=74,E5=76,Fs5=78,A5=81;
+  const mel = [
+    [A4,1],[D5,1],[Fs5,1], [E5,2],[D5,1], [B4,1],[D5,1],[A4,1], [A4,3],
+    [Fs4,1],[A4,1],[B4,1], [D5,2],[E5,1], [Fs5,1],[E5,1],[B4,1], [D5,3],
+    [Fs5,1],[A5,1],[Fs5,1], [E5,2],[D5,1], [B4,1],[D5,1],[E5,1], [Fs5,3],
+    [A5,1],[Fs5,1],[E5,1], [D5,2],[B4,1], [A4,1],[B4,1],[E5,1], [D5,3],
+  ];
+  const roots = [50,45,47,45, 54,43,45,50, 50,45,43,50, 47,43,45,50]; // бас по тактам
+  const events = [];  // [время в долях, midi, громкость]
+  let t = 0; for (const [n, d] of mel) { events.push([t, n, .32]); t += d; }
+  roots.forEach((r, i) => {
+    const b = i * 3;
+    events.push([b, r, .2], [b + 1, r + 12, .07], [b + 2, r + 19, .06]);
+  });
+  events.sort((a, b) => a[0] - b[0]);
+  const LOOP = 48;
+
+  function tine(when, midi, vol) {
+    const f = N(midi), g = ac.createGain();
+    g.connect(bus);
+    // основной тон + неровные обертоны, как у металлической гребёнки
+    [[1, 1, 2.6], [2, .22, 1.1], [3.01, .07, .6], [5.4, .045, .25]].forEach(([k, a, dec]) => {
+      if (f * k > 12000) return;
+      const o = ac.createOscillator(), e = ac.createGain();
+      o.type = 'sine'; o.frequency.value = f * k;
+      e.gain.setValueAtTime(0, when);
+      e.gain.linearRampToValueAtTime(vol * a, when + .004);
+      e.gain.exponentialRampToValueAtTime(.0001, when + dec);
+      o.connect(e).connect(g); o.start(when); o.stop(when + dec + .05);
+    });
+  }
+
+  function noise(sec) {
+    const b = ac.createBuffer(1, ac.sampleRate * sec, ac.sampleRate), d = b.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    const s = ac.createBufferSource(); s.buffer = b; return s;
+  }
+  function crack(when) {  // хруст печати
+    for (let i = 0; i < 4; i++) {
+      const s = noise(.05), f = ac.createBiquadFilter(), g = ac.createGain(), w = when + i * .028 + Math.random() * .015;
+      f.type = 'bandpass'; f.frequency.value = 1800 + Math.random() * 1800; f.Q.value = 1.2;
+      g.gain.setValueAtTime(.5 - i * .1, w); g.gain.exponentialRampToValueAtTime(.001, w + .04);
+      s.connect(f).connect(g).connect(master); s.start(w);
+    }
+  }
+  function rustle(when, dur) {  // шелест бумаги
+    const s = noise(dur), f = ac.createBiquadFilter(), g = ac.createGain();
+    f.type = 'bandpass'; f.Q.value = .8;
+    f.frequency.setValueAtTime(700, when); f.frequency.exponentialRampToValueAtTime(3200, when + dur);
+    g.gain.setValueAtTime(0, when); g.gain.linearRampToValueAtTime(.18, when + dur * .3);
+    g.gain.exponentialRampToValueAtTime(.001, when + dur);
+    s.connect(f).connect(g).connect(master); s.start(when);
+  }
+
+  function reverb() {
+    const len = ac.sampleRate * 2.8, ir = ac.createBuffer(2, len, ac.sampleRate);
+    for (let c = 0; c < 2; c++) { const d = ir.getChannelData(c);
+      for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 3); }
+    const cv = ac.createConvolver(); cv.buffer = ir; return cv;
+  }
+
+  function schedule() {
+    while (nextT < ac.currentTime + .6) {
+      const [b, n, v] = events[step % events.length];
+      const loop = Math.floor(step / events.length);
+      tine(startAt + (loop * LOOP + b) * Q, n, v);
+      step++;
+      const [nb] = events[step % events.length];
+      nextT = startAt + (Math.floor(step / events.length) * LOOP + nb) * Q;
+    }
+  }
+  let startAt = 0;
+
+  function start() {
+    if (ac) return;
+    const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
+    try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
+    ac = new AC(); ac.resume();
+    master = ac.createGain(); master.gain.value = .9; master.connect(ac.destination);
+    bus = ac.createGain(); bus.gain.value = 0;
+    const dry = ac.createGain(), wet = ac.createGain(), rv = reverb();
+    dry.gain.value = .75; wet.gain.value = .45;
+    bus.connect(dry).connect(master); bus.connect(rv).connect(wet).connect(master);
+    const t0 = ac.currentTime;
+    crack(t0 + .02); rustle(t0 + .45, .7); rustle(t0 + 1.3, 1.1);
+    startAt = t0 + 1.2; nextT = startAt;
+    bus.gain.setValueAtTime(0, startAt); bus.gain.linearRampToValueAtTime(.8, startAt + 2);
+    timer = setInterval(schedule, 120); schedule();
+    btn.hidden = false;
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) ac.suspend(); else if (!muted) ac.resume();
+    });
+  }
+
+  const btn = document.getElementById('mute');
+  btn.addEventListener('click', () => {
+    muted = !muted; btn.classList.toggle('muted', muted);
+    if (muted) ac.suspend(); else ac.resume();
+  });
+  return { start };
+})();
+
 (() => {
   const env = document.getElementById('env'), hint = document.getElementById('hint'), view = document.getElementById('view');
   const steps = [['s1',0],['s2',450],['s3',900],['s4',1300],['s5',2600]];
@@ -184,6 +306,7 @@
     setTimeout(() => view.classList.add('on'), 2700);
     setTimeout(() => document.getElementById('stage').classList.add('gone'), 3700);
     if (navigator.vibrate) navigator.vibrate(15);
+    sound.start();
   }
   env.addEventListener('click', open);
   env.addEventListener('keydown', e => { if (e.key==='Enter'||e.key===' ') { e.preventDefault(); open(); } });
